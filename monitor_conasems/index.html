@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Radar SUS — Faturamento SUS e Regulatório">
+  <title>Radar SUS | CONASEMS</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="assets/supabase-config.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap nav">
+    <a class="brand" href="index.html">
+      <!-- Substituído a badge textual por imagem -->
+      <img src="assets/logo.png" alt="LNRCC" class="brand-logo">
+      <span><b>Radar SUS</b><small>Faturamento SUS e Regulatório</small></span>
+    </a>
+    <span class="source-pill">CONASEMS</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <div class="eyebrow">MONITORAMENTO DIÁRIO</div>
+      <h1>Faturamento SUS e Regulatório,<br><em>organizado para decisão.</em></h1>
+      <p>Pesquise portarias e publicações identificadas pelo monitor CONASEMS. Use os filtros para encontrar rapidamente o que importa.</p>
+    </div>
+    <div class="hero-date">
+      <span>Última coleta disponível</span>
+      <strong id="lastDate">—</strong>
+    </div>
+  </section>
+
+  <section class="stats" id="stats"></section>
+
+  <section class="panel filters">
+    <div class="searchbox">
+      <span>⌕</span>
+      <input id="q" type="search" placeholder="Pesquisar portaria, assunto, órgão, município, CNES...">
+    </div>
+    <div class="filter-grid">
+      <label>Data inicial<input id="dateStart" type="date"></label>
+      <label>Data final<input id="dateEnd" type="date"></label>
+      <label>Categoria<select id="category"><option value="">Todas</option></select></label>
+      <label>Relevância<select id="relevance"><option value="">Todas</option><option>ALTA</option><option>MEDIA</option><option>BAIXA</option></select></label>
+    </div>
+    <div class="filter-footer">
+      <span id="resultCount">0 publicações</span>
+      <button class="clear" id="clear">Limpar filtros</button>
+    </div>
+  </section>
+
+  <section class="content-head">
+    <div>
+      <div class="eyebrow">PUBLICAÇÕES</div>
+      <h2 id="sectionTitle">Todas as publicações</h2>
+    </div>
+    <select id="sort" class="sort">
+      <option value="date">Mais recentes</option>
+      <option value="relevance">Maior relevância</option>
+      <option value="title">Título A–Z</option>
+    </select>
+  </section>
+
+  <section id="cards" class="cards"></section>
+  <div id="empty" class="empty hidden">
+    <div class="empty-icon">⌕</div>
+    <h3>Nenhuma publicação encontrada</h3>
+    <p>Tente ampliar o período ou remover algum filtro.</p>
+  </div>
+  <div id="pagination" class="pagination"></div>
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <span>Radar SUS · CONASEMS</span>
+    <span>Dados coletados automaticamente · 2026</span>
+  </div>
+</footer>
+<script src="assets/app.js"></script>
+</body>
+</html>
