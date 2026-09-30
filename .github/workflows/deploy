@@ -1,0 +1,52 @@
+name: Publicar Radar SUS
+
+on:
+  push:
+    branches:
+      - master
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v6
+
+      - name: Configurar GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Preparar site
+        run: |
+          rm -rf _site
+          mkdir -p _site
+
+          cp monitor_conasems/index.html _site/index.html
+          cp monitor_conasems/portaria.html _site/portaria.html
+
+          cp -r monitor_conasems/assets _site/assets
+          cp -r monitor_conasems/data _site/data
+
+      - name: Enviar artefato para GitHub Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Publicar no GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
