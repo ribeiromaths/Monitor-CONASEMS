@@ -1,4 +1,4 @@
-name: Monitor CONASEMS — 066
+name: Monitor CONASEMS — 06h
 
 on:
   schedule:
@@ -6,6 +6,25 @@ on:
       timezone: "America/Sao_Paulo"
 
   workflow_dispatch:
+    inputs:
+      modo:
+        description: "Período da busca"
+        required: true
+        default: "ontem"
+        type: choice
+        options:
+          - ontem
+          - periodo
+
+      data_inicial:
+        description: "Data inicial (DD/MM/AAAA) — usada no modo período"
+        required: false
+        type: string
+
+      data_final:
+        description: "Data final (DD/MM/AAAA) — usada no modo período"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -20,6 +39,7 @@ jobs:
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
     steps:
+
       - name: Baixar código
         uses: actions/checkout@v6
 
@@ -33,9 +53,40 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r monitor_conasems/monitor/requirements.txt
 
-      - name: Buscar publicações do dia anterior
+      - name: Buscar publicações — automático
+        if: github.event_name == 'schedule'
         run: |
-          python monitor_conasems/monitor/monitor.py --ontem --fonte conasems
+          python monitor_conasems/monitor/monitor.py \
+            --ontem \
+            --fonte conasems
+
+      - name: Buscar publicações — ontem
+        if: github.event_name == 'workflow_dispatch' && inputs.modo == 'ontem'
+        run: |
+          python monitor_conasems/monitor/monitor.py \
+            --ontem \
+            --fonte conasems
+
+      - name: Validar datas — período
+        if: github.event_name == 'workflow_dispatch' && inputs.modo == 'periodo'
+        run: |
+          if [ -z "${{ inputs.data_inicial }}" ]; then
+            echo "ERRO: informe a data inicial."
+            exit 1
+          fi
+
+          if [ -z "${{ inputs.data_final }}" ]; then
+            echo "ERRO: informe a data final."
+            exit 1
+          fi
+
+      - name: Buscar publicações — período
+        if: github.event_name == 'workflow_dispatch' && inputs.modo == 'periodo'
+        run: |
+          python monitor_conasems/monitor/monitor.py \
+            --inicio "${{ inputs.data_inicial }}" \
+            --fim "${{ inputs.data_final }}" \
+            --fonte conasems
 
       - name: Sincronizar com Supabase
         run: |
