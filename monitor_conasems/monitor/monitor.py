@@ -257,18 +257,18 @@ def scrape_conasems(start, end, kw, debug=False):
     rows = []
     d = start
 
-while d <= end:
-# CONASEMS normalmente não possui publicação de legislação diária
-# aos sábados e domingos. Não fazemos requisições nesses dias.
-    if d.weekday() >= 5:
-        print(
-            f"    CONASEMS {d:%d/%m/%Y}... fim de semana — ignorado",
-            flush=True
-        )
-        d += timedelta(days=1)
-        continue
+    while d <= end:
+        # CONASEMS normalmente não possui publicação de legislação diária
+        # aos sábados e domingos. Não fazemos requisições nesses dias.
+        if d.weekday() >= 5:
+            print(
+                f"    CONASEMS {d:%d/%m/%Y}... fim de semana — ignorado",
+                flush=True
+            )
+            d += timedelta(days=1)
+            continue
 
-    print(f"    CONASEMS {d:%d/%m/%Y}...", end=" ", flush=True)
+        print(f"    CONASEMS {d:%d/%m/%Y}...", end=" ", flush=True)
         page = locate_conasems_page(s, d, debug)
 
         if not page:
