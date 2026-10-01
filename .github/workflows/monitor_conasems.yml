@@ -32,7 +32,7 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
 
     env:
       SUPABASE_URL: "https://ndmuexdgukgfmzyoilda.supabase.co"
