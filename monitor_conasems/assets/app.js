@@ -106,7 +106,7 @@ function matches(r){
   if(q){
     const hay = [
       r.titulo,r.resumo,r.portaria,r.orgao,r.municipio,
-      r.cnes,r.valores,r.palavras,r.categoria
+      r.cnes,r.estabelecimento,r.valores,r.palavras,r.categoria
     ].join(" ").toLowerCase();
     if(!hay.includes(q)) return false;
   }
@@ -165,7 +165,7 @@ function render(){
       <h3>${esc(r.titulo || r.portaria || "Publicação sem título")}</h3>
       <p>${esc(r.resumo || "Sem resumo disponível.")}</p>
       <div class="card-bottom">
-        <span>${esc(r.portaria || r.orgao || "CONASEMS")}</span>
+        <span>${esc(r.estabelecimento || r.portaria || r.orgao || "CONASEMS")}</span>
         <span class="arrow">Ver detalhes →</span>
       </div>
     </a>`;

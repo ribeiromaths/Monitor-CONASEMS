@@ -81,6 +81,7 @@ async function init(){
         <div class="info"><label>Órgão</label><div>${esc(r.orgao||"—")}</div></div>
         <div class="info"><label>Município</label><div>${esc(r.municipio||"Não identificado")}</div></div>
         <div class="info"><label>CNES</label><div>${esc(r.cnes||"Não identificado")}</div></div>
+        <div class="info"><label>Estabelecimento de saúde</label><div>${esc(r.estabelecimento||"Não identificado")}</div></div>
         <div class="info"><label>Valores</label><div>${esc(r.valores||"Não identificado")}</div></div>
         <div class="info"><label>Palavras encontradas</label><div>${esc(r.palavras||"—")}</div></div>
       </div>

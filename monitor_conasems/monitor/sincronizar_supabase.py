@@ -42,6 +42,10 @@ def main():
 
     df = pd.read_excel(HISTORY_FILE, dtype=str).fillna("")
 
+    # Campo recém-adicionado; planilhas históricas antigas ainda podem não tê-lo.
+    if "ESTABELECIMENTO" not in df.columns:
+        df["ESTABELECIMENTO"] = ""
+
     required = [
         "FONTE","DATA","ÓRGÃO","CATEGORIA","RELEVÂNCIA",
         "PALAVRAS_ENCONTRADAS","PORTARIA","CNES","MUNICÍPIO",
@@ -59,7 +63,7 @@ def main():
         if not link or not titulo or not data:
             continue
 
-        rows.append({
+        registro = {
             "fonte": clean(r["FONTE"]) or "CONASEMS",
             "data": data,
             "orgao": clean(r["ÓRGÃO"]),
@@ -74,7 +78,11 @@ def main():
             "resumo": clean(r["RESUMO"]),
             "link": link,
             "coleta_em": clean(r["COLETA_EM"]),
-        })
+        }
+        estabelecimento = clean(r.get("ESTABELECIMENTO", ""))
+        if estabelecimento:
+            registro["estabelecimento"] = estabelecimento
+        rows.append(registro)
 
     headers = {
         "apikey": SUPABASE_SECRET_KEY,

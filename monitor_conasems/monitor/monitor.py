@@ -47,6 +47,19 @@ HEADERS = {
 
 TIMEOUT = (15, 75)
 
+# Referências confirmadas do CNES para estabelecimentos prioritários.
+# A lista pode ser ampliada quando outros CNES institucionais forem identificados.
+CNES_CONHECIDOS = {
+    "2409194": {
+        "estabelecimento": "HOSPITAL DR LUIZ ANTONIO",
+        "municipio": "NATAL/RN",
+    },
+}
+
+# Timeout curto para consultar páginas individuais do DOU. A consulta é
+# paralelizada para que a extração do texto integral não prolongue muito a coleta.
+DOU_TIMEOUT = (7, 18)
+
 
 # ============================================================
 # UTILITÁRIOS
@@ -144,9 +157,92 @@ def extract_portaria(text):
 
 
 def extract_cnes(text):
-    vals = re.findall(r"\bCNES\s*[:\-]?\s*(\d{7})\b", text or "", flags=re.I)
+    """Extrai códigos CNES explicitamente rotulados e CNES prioritários conhecidos."""
+    content = text or ""
+    vals = re.findall(
+        r"\b(?:C\.?N\.?E\.?S\.?)\s*(?:N[ºO°.]\s*)?[:\-–]?\s*(\d{7})\b",
+        content,
+        flags=re.I,
+    )
+
+    # Alguns atos apresentam o número em tabelas ou listas cujo cabeçalho CNES
+    # não fica adjacente ao valor depois da conversão do HTML em texto.
+    for code in CNES_CONHECIDOS:
+        if re.search(rf"(?<!\d){re.escape(code)}(?!\d)", content):
+            vals.append(code)
+
     return "; ".join(dict.fromkeys(vals))
 
+
+def extract_estabelecimento(text, cnes=""):
+    """Resolve o nome do estabelecimento pelo CNES ou por rótulos do próprio ato."""
+    content = text or ""
+    codes = [x.strip() for x in str(cnes or "").split(";") if x.strip()]
+
+    for code in codes:
+        known = CNES_CONHECIDOS.get(code)
+        if known and known.get("estabelecimento"):
+            return known["estabelecimento"]
+
+    # Fallback para atos estruturados que trazem denominação/nome explícitos.
+    patterns = [
+        r"(?:denomina(?:ção|cao)|nome\s+do\s+estabelecimento|estabelecimento\s+de\s+saúde|estabelecimento)\s*[:\-–]\s*(.{5,180}?)(?=\s+(?:CNPJ|CNES|CEP|ENDEREÇO|ENDERECO|MUNICÍPIO|MUNICIPIO|UF)\b|[.;]|$)",
+    ]
+    for pattern in patterns:
+        found = re.findall(pattern, content, flags=re.I)
+        cleaned = []
+        for item in found:
+            name = re.sub(r"\s+", " ", item).strip(" ,;.-")
+            if name and len(name) >= 5:
+                cleaned.append(name)
+        if cleaned:
+            # Evita retornar listas genéricas enormes vindas de um resumo.
+            return list(dict.fromkeys(cleaned))[0].upper()
+
+    return ""
+
+
+def fetch_official_full_text(url):
+    """Busca texto da publicação oficial do DOU para detectar dados que não
+    aparecem no resumo/link apresentado no CONASEMS. Falhas retornam string vazia.
+    """
+    if "in.gov.br" not in (url or "").lower():
+        return ""
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=DOU_TIMEOUT)
+        if response.status_code != 200:
+            return ""
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        selectors = [
+            ".texto-dou", "#texto-dou", "div.texto-dou", ".dou-paragraph",
+            "#content-core", "article", "main", ".conteudo", ".texto",
+        ]
+        candidates = []
+        for selector in selectors:
+            try:
+                for element in soup.select(selector):
+                    value = re.sub(r"\s+", " ", element.get_text(" ", strip=True)).strip()
+                    if len(value) >= 100:
+                        candidates.append(value)
+            except Exception:
+                continue
+
+        # Escolhe o bloco mais extenso; quando não houver bloco editorial conhecido,
+        # usa o corpo da página como fallback.
+        if candidates:
+            full_text = max(candidates, key=len)
+        else:
+            target = soup.body or soup
+            full_text = re.sub(r"\s+", " ", target.get_text(" ", strip=True)).strip()
+
+        # Evita carregar texto exageradamente grande em cada publicação.
+        return full_text[:40000]
+
+    except requests.RequestException as exc:
+        print(f"      DOU indisponível ({type(exc).__name__}) para {url}")
+        return ""
 
 def extract_uf_municipios(text):
     # Heurística simples para destacar municípios/UF quando aparecem.
@@ -166,6 +262,19 @@ def extract_uf_municipios(text):
 def make_row(source, d, title, text, url, kw, orgao=""):
     combined = f"{title} {text}"
     hits, cats, rel = keyword_matches(combined, kw)
+    cnes = extract_cnes(combined)
+    estabelecimento = extract_estabelecimento(combined, cnes)
+    municipio = extract_uf_municipios(combined)
+
+    # Para CNES de referência, preenche também estabelecimento e município,
+    # mesmo quando a portaria não repete esses dados de forma legível.
+    for code in [x.strip() for x in cnes.split(";") if x.strip()]:
+        known = CNES_CONHECIDOS.get(code, {})
+        if not estabelecimento:
+            estabelecimento = known.get("estabelecimento", "")
+        if not municipio:
+            municipio = known.get("municipio", "")
+
     return {
         "FONTE": source,
         "DATA": d.strftime("%d/%m/%Y") if isinstance(d, date) else str(d),
@@ -174,8 +283,9 @@ def make_row(source, d, title, text, url, kw, orgao=""):
         "RELEVÂNCIA": rel,
         "PALAVRAS_ENCONTRADAS": hits,
         "PORTARIA": extract_portaria(combined),
-        "CNES": extract_cnes(combined),
-        "MUNICÍPIO": extract_uf_municipios(combined),
+        "CNES": cnes,
+        "ESTABELECIMENTO": estabelecimento,
+        "MUNICÍPIO": municipio,
         "VALORES": extract_money(combined),
         "TÍTULO": re.sub(r"\s+", " ", title).strip(),
         "RESUMO": re.sub(r"\s+", " ", text).strip()[:5000],
@@ -258,13 +368,9 @@ def scrape_conasems(start, end, kw, debug=False):
     d = start
 
     while d <= end:
-        # CONASEMS normalmente não possui publicação de legislação diária
-        # aos sábados e domingos. Não fazemos requisições nesses dias.
+        # CONASEMS normalmente não publica legislação diária aos sábados e domingos.
         if d.weekday() >= 5:
-            print(
-                f"    CONASEMS {d:%d/%m/%Y}... fim de semana — ignorado",
-                flush=True
-            )
+            print(f"    CONASEMS {d:%d/%m/%Y}... fim de semana — ignorado", flush=True)
             d += timedelta(days=1)
             continue
 
@@ -280,50 +386,60 @@ def scrape_conasems(start, end, kw, debug=False):
         main = soup.find("main") or soup
         anchors = main.find_all("a", href=True)
 
-        count = 0
+        # Primeiro reúne os links do DOU; o conteúdo integral é necessário porque
+        # CNES/estabelecimento podem aparecer no corpo ou em tabelas do ato, mas
+        # não no pequeno resumo que o CONASEMS exibe junto ao link.
+        publications = []
+        seen_links = set()
         for a in anchors:
             href = urljoin(url, a.get("href"))
             title = " ".join(a.stripped_strings)
-
-            # O conteúdo de legislação diária aponta para in.gov.br.
-            if "in.gov.br" not in href:
+            if "in.gov.br" not in href.lower() or not title or href in seen_links:
                 continue
-            if not title:
-                continue
-
-            # Pega o bloco imediatamente associado ao link.
+            seen_links.add(href)
             parent = a.parent
-            text = parent.get_text(" ", strip=True) if parent else title
+            snippet = parent.get_text(" ", strip=True) if parent else title
+            publications.append({"url": href, "title": title, "snippet": snippet})
 
-            # Acrescenta o título da publicação. O filtro é LOCAL.
-            combined = f"{title} {text}"
-            hits, _, _ = keyword_matches(combined, kw)
-            if not hits:
-                continue
+        if publications:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                full_texts = list(pool.map(
+                    lambda item: fetch_official_full_text(item["url"]),
+                    publications,
+                ))
 
-            rows.append(
-                make_row(
-                    "CONASEMS", d, title, text, href, kw,
-                    orgao="MINISTÉRIO DA SAÚDE / CONASEMS"
-                )
-            )
-            count += 1
+            for item, official_text in zip(publications, full_texts):
+                # Preferimos o texto do DOU; preservamos também o resumo do CONASEMS
+                # porque ele pode conter etiquetas ou informações úteis.
+                text_parts = [item["snippet"], official_text]
+                combined_text = " ".join(part for part in text_parts if part)
+                combined_for_match = f"{item['title']} {combined_text}"
+                hits, _, _ = keyword_matches(combined_for_match, kw)
+                if not hits:
+                    continue
 
-        # Se não houver links in.gov, faz fallback para o texto completo.
-        if not count:
+                # O texto integral passa para make_row, permitindo extrair CNES,
+                # estabelecimento, município e termos que só aparecem no ato oficial.
+                row_text = official_text or item["snippet"]
+                rows.append(make_row(
+                    "CONASEMS", d, item["title"],
+                    f"{item['snippet']} {row_text}", item["url"], kw,
+                    orgao="MINISTÉRIO DA SAÚDE / CONASEMS",
+                ))
+
+        # Fallback se o portal não tiver links individuais in.gov.br.
+        if not publications:
             text = main.get_text(" ", strip=True)
             hits, _, _ = keyword_matches(text, kw)
             if hits:
-                rows.append(
-                    make_row(
-                        "CONASEMS", d,
-                        f"Legislação Diária Nacional - {d:%d/%m/%Y}",
-                        text, url, kw, orgao="CONASEMS"
-                    )
-                )
-                count = 1
+                rows.append(make_row(
+                    "CONASEMS", d,
+                    f"Legislação Diária Nacional - {d:%d/%m/%Y}",
+                    text, url, kw, orgao="CONASEMS",
+                ))
 
-        print(f"{count} achado(s)")
+        daily_count = sum(1 for row in rows if row.get("DATA") == d.strftime("%d/%m/%Y"))
+        print(f"{daily_count} achado(s) após leitura do DOU")
         d += timedelta(days=1)
 
     return rows
