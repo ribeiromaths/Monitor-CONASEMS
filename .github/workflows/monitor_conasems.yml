@@ -36,7 +36,6 @@ jobs:
 
     env:
       SUPABASE_URL: "https://ndmuexdgukgfmzyoilda.supabase.co"
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
 
     steps:
 
@@ -89,5 +88,7 @@ jobs:
             --fonte conasems
 
       - name: Sincronizar com Supabase
+        env:
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
           python monitor_conasems/monitor/sincronizar_supabase.py
