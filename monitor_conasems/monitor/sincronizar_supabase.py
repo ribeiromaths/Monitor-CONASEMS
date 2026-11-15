@@ -1,127 +1,132 @@
-from __future__ import annotations
 
-import os
-import time
-from pathlib import Path
+    
+  
+        # A planilha pode ter mais de uma linha para o mesmo link. Mantém a
+        # última ocorrência, mas não perde os campos enriquecidos já presentes
+        # na ocorrência anterior quando a linha mais nova estiver vazia neles.
+        if link in by_link:
+            duplicates += 1
+            previous = by_link[link]
+            for field in CAMPOS_ENRIQUECIDOS:
+                if field not in record and field in previous:
+                    record[field] = previous[field]
 
-import pandas as pd
-import requests
+        by_link[link] = record
 
-ROOT = Path(__file__).resolve().parent
-HISTORY_FILE = ROOT / "dados" / "historico.xlsx"
+    return list(by_link.values()), ignored, duplicates
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ndmuexdgukgfmzyoilda.supabase.co").rstrip("/")
-SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 
-TABLE_URL = f"{SUPABASE_URL}/rest/v1/publicacoes"
-CHUNK_SIZE = 100
+def group_by_same_keys(records: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    """Agrupa objetos com o mesmo conjunto de chaves para evitar PGRST102."""
+    groups: dict[tuple[str, ...], list[dict[str, str]]] = defaultdict(list)
 
-def iso_date(value):
-    if pd.isna(value) or str(value).strip() == "":
-        return None
-    dt = pd.to_datetime(value, dayfirst=True, errors="coerce")
-    if pd.isna(dt):
-        return None
-    return dt.strftime("%Y-%m-%d")
+    for record in records:
+        # A ordenação torna a assinatura das chaves determinística.
+        key_signature = tuple(sorted(record.keys()))
+        groups[key_signature].append(record)
 
-def clean(v):
-    if pd.isna(v):
-        return None
-    s = str(v).strip()
-    return s if s else None
+    return list(groups.values())
 
-def main():
+
+def send_batch(
+    session: requests.Session,
+    batch: list[dict[str, str]],
+    headers: dict[str, str],
+    batch_number: int,
+    batch_total: int,
+) -> None:
+    """Envia um lote homogêneo, repetindo apenas erros temporários."""
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            response = session.post(
+                TABLE_URL,
+                params={"on_conflict": "link"},
+                headers=headers,
+                json=batch,
+                timeout=(20, 90),
+            )
+
+            if 200 <= response.status_code < 300:
+                print(
+                    f"Lote {batch_number}/{batch_total}: "
+                    f"{len(batch)} registros sincronizados."
+                )
+                return
+
+            # Erros 4xx (incluindo erro de estrutura/schema) não se resolvem
+            # repetindo a mesma requisição. Interrompe e mostra a resposta.
+            if 400 <= response.status_code < 500:
+                raise SystemExit(
+                    f"Supabase respondeu HTTP {response.status_code}: "
+                    f"{response.text[:1500]}"
+                )
+
+            if attempt == MAX_ATTEMPTS - 1:
+                raise SystemExit(
+                    f"Supabase respondeu HTTP {response.status_code} após "
+                    f"{MAX_ATTEMPTS} tentativas: {response.text[:1500]}"
+                )
+
+            wait = 2 ** attempt
+            print(
+                f"Erro temporário HTTP {response.status_code}. "
+                f"Nova tentativa em {wait}s..."
+            )
+            time.sleep(wait)
+
+        except requests.RequestException as exc:
+            if attempt == MAX_ATTEMPTS - 1:
+                raise SystemExit(
+                    f"Falha de conexão com o Supabase após "
+                    f"{MAX_ATTEMPTS} tentativas: {exc}"
+                ) from exc
+
+            wait = 2 ** attempt
+            print(f"Falha de conexão: {exc}. Nova tentativa em {wait}s...")
+            time.sleep(wait)
+
+
+def main() -> None:
     if not SUPABASE_SECRET_KEY:
         raise SystemExit(
             "SUPABASE_SECRET_KEY não definida. "
-            "No GitHub Actions, crie esse Secret com a chave sb_secret_... do Supabase."
+            "No GitHub Actions, configure esse Secret com a chave sb_secret_... do Supabase."
         )
 
     if not HISTORY_FILE.exists():
         raise SystemExit(f"Histórico não encontrado: {HISTORY_FILE}")
 
+    print(f"Lendo histórico: {HISTORY_FILE}")
     df = pd.read_excel(HISTORY_FILE, dtype=str).fillna("")
 
-    # Campo recém-adicionado; planilhas históricas antigas ainda podem não tê-lo.
-    if "ESTABELECIMENTO" not in df.columns:
-        df["ESTABELECIMENTO"] = ""
+    records, ignored, duplicates = build_records(df)
+    if not records:
+        print("Nenhum registro válido encontrado. Nada foi enviado ao Supabase.")
+        return
 
-    required = [
-        "FONTE","DATA","ÓRGÃO","CATEGORIA","RELEVÂNCIA",
-        "PALAVRAS_ENCONTRADAS","PORTARIA","CNES","MUNICÍPIO",
-        "VALORES","TÍTULO","RESUMO","LINK","COLETA_EM"
-    ]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise SystemExit(f"Colunas ausentes no histórico: {missing}")
-
-    rows = []
-    for _, r in df.iterrows():
-        link = clean(r["LINK"])
-        titulo = clean(r["TÍTULO"])
-        data = iso_date(r["DATA"])
-        if not link or not titulo or not data:
-            continue
-
-        registro = {
-            "fonte": clean(r["FONTE"]) or "CONASEMS",
-            "data": data,
-            "orgao": clean(r["ÓRGÃO"]),
-            "categoria": clean(r["CATEGORIA"]),
-            "relevancia": clean(r["RELEVÂNCIA"]),
-            "palavras": clean(r["PALAVRAS_ENCONTRADAS"]),
-            "portaria": clean(r["PORTARIA"]),
-            "cnes": clean(r["CNES"]),
-            "municipio": clean(r["MUNICÍPIO"]),
-            "valores": clean(r["VALORES"]),
-            "titulo": titulo,
-            "resumo": clean(r["RESUMO"]),
-            "link": link,
-            "coleta_em": clean(r["COLETA_EM"]),
-        }
-        estabelecimento = clean(r.get("ESTABELECIMENTO", ""))
-        if estabelecimento:
-            registro["estabelecimento"] = estabelecimento
-        rows.append(registro)
+    groups = group_by_same_keys(records)
+    batches: list[list[dict[str, str]]] = []
+    for group in groups:
+        for start in range(0, len(group), CHUNK_SIZE):
+            batches.append(group[start : start + CHUNK_SIZE])
 
     headers = {
         "apikey": SUPABASE_SECRET_KEY,
         "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=minimal",
-        "User-Agent": "Radar-SUS-GitHub-Actions/1.0",
+        "User-Agent": "Radar-SUS-GitHub-Actions/1.1",
     }
 
-    total = 0
-    for i in range(0, len(rows), CHUNK_SIZE):
-        chunk = rows[i:i+CHUNK_SIZE]
-        for attempt in range(3):
-            try:
-                response = requests.post(
-                    TABLE_URL,
-                    params={"on_conflict": "link"},
-                    headers=headers,
-                    json=chunk,
-                    timeout=90,
-                )
-                if 200 <= response.status_code < 300:
-                    total += len(chunk)
-                    print(f"Supabase: {total}/{len(rows)} registros sincronizados.")
-                    break
+    print(f"Registros válidos: {len(records)}")
+    print(f"Linhas ignoradas por falta de link/título/data: {ignored}")
+    print(f"Links duplicados consolidados: {duplicates}")
+    print(f"Grupos com estrutura de campos homogênea: {len(groups)}")
+    print(f"Lotes a enviar: {len(batches)}")
 
-                if attempt == 2:
-                    raise SystemExit(
-                        f"Supabase respondeu HTTP {response.status_code}: "
-                        f"{response.text[:1000]}"
-                    )
-                time.sleep(2 ** attempt)
+    session = requests.Session()
+    try:
+        for index, batch in enumerate(batches, start=1):
+            send_batch(session, batch, headers, index, len(batches))
+    finally:
 
-            except requests.RequestException as exc:
-                if attempt == 2:
-                    raise SystemExit(f"Falha de conexão com o Supabase: {exc}")
-                time.sleep(2 ** attempt)
-
-    print(f"Sincronização concluída. Total enviado: {total}")
-
-if __name__ == "__main__":
-    main()
