@@ -1,132 +1,159 @@
+from __future__ import annotations
 
-    
-  
-        # A planilha pode ter mais de uma linha para o mesmo link. Mantém a
-        # última ocorrência, mas não perde os campos enriquecidos já presentes
-        # na ocorrência anterior quando a linha mais nova estiver vazia neles.
-        if link in by_link:
-            duplicates += 1
-            previous = by_link[link]
-            for field in CAMPOS_ENRIQUECIDOS:
-                if field not in record and field in previous:
-                    record[field] = previous[field]
+import os
+import re
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Any
 
-        by_link[link] = record
+import pandas as pd
+import requests
 
-    return list(by_link.values()), ignored, duplicates
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
 
+ROOT = Path(__file__).resolve().parent
+HISTORY_FILE = ROOT / "dados" / "historico.xlsx"
 
-def group_by_same_keys(records: list[dict[str, str]]) -> list[list[dict[str, str]]]:
-    """Agrupa objetos com o mesmo conjunto de chaves para evitar PGRST102."""
-    groups: dict[tuple[str, ...], list[dict[str, str]]] = defaultdict(list)
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    "https://ndmuexdgukgfmzyoilda.supabase.co",
+).rstrip("/")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 
-    for record in records:
-        # A ordenação torna a assinatura das chaves determinística.
-        key_signature = tuple(sorted(record.keys()))
-        groups[key_signature].append(record)
+TABLE_URL = f"{SUPABASE_URL}/rest/v1/publicacoes"
+CHUNK_SIZE = 100
+MAX_ATTEMPTS = 3
 
-    return list(groups.values())
+# Complementa os dados quando o CNES conhecido estiver presente na planilha.
+# Não cria um registro se o CNES não estiver informado.
+CNES_CONHECIDOS = {
+    "2409194": {
+        "estabelecimento": "HOSPITAL DR LUIZ ANTONIO",
+        "municipio": "NATAL/RN",
+    },
+}
 
+# Campos opcionais: se a célula estiver vazia, a coluna NÃO será enviada ao
+# Supabase. Isso evita substituir valores já existentes por NULL.
+CAMPOS_OPCIONAIS = {
+    "orgao": "ÓRGÃO",
+    "categoria": "CATEGORIA",
+    "relevancia": "RELEVÂNCIA",
+    "palavras": "PALAVRAS_ENCONTRADAS",
+    "portaria": "PORTARIA",
+    "cnes": "CNES",
+    "municipio": "MUNICÍPIO",
+    "valores": "VALORES",
+    "resumo": "RESUMO",
+    "coleta_em": "COLETA_EM",
+    "estabelecimento": "ESTABELECIMENTO",
+}
 
-def send_batch(
-    session: requests.Session,
-    batch: list[dict[str, str]],
-    headers: dict[str, str],
-    batch_number: int,
-    batch_total: int,
-) -> None:
-    """Envia um lote homogêneo, repetindo apenas erros temporários."""
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            response = session.post(
-                TABLE_URL,
-                params={"on_conflict": "link"},
-                headers=headers,
-                json=batch,
-                timeout=(20, 90),
-            )
-
-            if 200 <= response.status_code < 300:
-                print(
-                    f"Lote {batch_number}/{batch_total}: "
-                    f"{len(batch)} registros sincronizados."
-                )
-                return
-
-            # Erros 4xx (incluindo erro de estrutura/schema) não se resolvem
-            # repetindo a mesma requisição. Interrompe e mostra a resposta.
-            if 400 <= response.status_code < 500:
-                raise SystemExit(
-                    f"Supabase respondeu HTTP {response.status_code}: "
-                    f"{response.text[:1500]}"
-                )
-
-            if attempt == MAX_ATTEMPTS - 1:
-                raise SystemExit(
-                    f"Supabase respondeu HTTP {response.status_code} após "
-                    f"{MAX_ATTEMPTS} tentativas: {response.text[:1500]}"
-                )
-
-            wait = 2 ** attempt
-            print(
-                f"Erro temporário HTTP {response.status_code}. "
-                f"Nova tentativa em {wait}s..."
-            )
-            time.sleep(wait)
-
-        except requests.RequestException as exc:
-            if attempt == MAX_ATTEMPTS - 1:
-                raise SystemExit(
-                    f"Falha de conexão com o Supabase após "
-                    f"{MAX_ATTEMPTS} tentativas: {exc}"
-                ) from exc
-
-            wait = 2 ** attempt
-            print(f"Falha de conexão: {exc}. Nova tentativa em {wait}s...")
-            time.sleep(wait)
+CAMPOS_ENRIQUECIDOS = ("cnes", "estabelecimento", "municipio")
 
 
-def main() -> None:
-    if not SUPABASE_SECRET_KEY:
-        raise SystemExit(
-            "SUPABASE_SECRET_KEY não definida. "
-            "No GitHub Actions, configure esse Secret com a chave sb_secret_... do Supabase."
-        )
-
-    if not HISTORY_FILE.exists():
-        raise SystemExit(f"Histórico não encontrado: {HISTORY_FILE}")
-
-    print(f"Lendo histórico: {HISTORY_FILE}")
-    df = pd.read_excel(HISTORY_FILE, dtype=str).fillna("")
-
-    records, ignored, duplicates = build_records(df)
-    if not records:
-        print("Nenhum registro válido encontrado. Nada foi enviado ao Supabase.")
-        return
-
-    groups = group_by_same_keys(records)
-    batches: list[list[dict[str, str]]] = []
-    for group in groups:
-        for start in range(0, len(group), CHUNK_SIZE):
-            batches.append(group[start : start + CHUNK_SIZE])
-
-    headers = {
-        "apikey": SUPABASE_SECRET_KEY,
-        "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=minimal",
-        "User-Agent": "Radar-SUS-GitHub-Actions/1.1",
-    }
-
-    print(f"Registros válidos: {len(records)}")
-    print(f"Linhas ignoradas por falta de link/título/data: {ignored}")
-    print(f"Links duplicados consolidados: {duplicates}")
-    print(f"Grupos com estrutura de campos homogênea: {len(groups)}")
-    print(f"Lotes a enviar: {len(batches)}")
-
-    session = requests.Session()
+def clean(value: Any) -> str | None:
+    """Converte valores da planilha em texto limpo ou None."""
+    if value is None:
+        return None
     try:
-        for index, batch in enumerate(batches, start=1):
-            send_batch(session, batch, headers, index, len(batches))
-    finally:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
 
+    text = str(value).strip()
+    return text if text else None
+
+
+def iso_date(value: Any) -> str | None:
+    """Converte datas da planilha para YYYY-MM-DD."""
+    value = clean(value)
+    if not value:
+        return None
+
+    parsed = pd.to_datetime(value, dayfirst=True, errors="coerce")
+    if pd.isna(parsed):
+        return None
+
+    return parsed.strftime("%Y-%m-%d")
+
+
+def normalize_cnes(value: str | None) -> str | None:
+    """Normaliza CNES quando a planilha o entrega como número com .0."""
+    value = clean(value)
+    if not value:
+        return None
+
+    # Ex.: 2409194.0 -> 2409194. Mantém textos fora desse padrão intactos.
+    match = re.fullmatch(r"(\d{7})(?:\.0+)?", value)
+    if match:
+        return match.group(1)
+    return value
+
+
+def build_records(df: pd.DataFrame) -> tuple[list[dict[str, str]], int, int]:
+    """Monta os registros, omite campos vazios e elimina links duplicados."""
+    required = [
+        "FONTE",
+        "DATA",
+        "ÓRGÃO",
+        "CATEGORIA",
+        "RELEVÂNCIA",
+        "PALAVRAS_ENCONTRADAS",
+        "PORTARIA",
+        "CNES",
+        "MUNICÍPIO",
+        "VALORES",
+        "TÍTULO",
+        "RESUMO",
+        "LINK",
+        "COLETA_EM",
+    ]
+    missing = [column for column in required if column not in df.columns]
+    if missing:
+        raise SystemExit(f"Colunas ausentes no histórico: {missing}")
+
+    # Campo novo: planilhas antigas podem não possuir essa coluna.
+    if "ESTABELECIMENTO" not in df.columns:
+        df["ESTABELECIMENTO"] = ""
+
+    by_link: dict[str, dict[str, str]] = {}
+    ignored = 0
+    duplicates = 0
+
+    for _, row in df.iterrows():
+        link = clean(row.get("LINK"))
+        title = clean(row.get("TÍTULO"))
+        date = iso_date(row.get("DATA"))
+
+        if not link or not title or not date:
+            ignored += 1
+            continue
+
+        # Estes quatro campos são a base mínima de cada publicação.
+        record: dict[str, str] = {
+            "fonte": clean(row.get("FONTE")) or "CONASEMS",
+            "data": date,
+            "titulo": title,
+            "link": link,
+        }
+
+        # Só adiciona campos opcionais que realmente têm conteúdo.
+        for db_field, excel_field in CAMPOS_OPCIONAIS.items():
+            value = clean(row.get(excel_field))
+            if value:
+                if db_field == "cnes":
+                    value = normalize_cnes(value)
+                if value:
+                    record[db_field] = value
+
+        # Complementa os dados do CNES 2409194 quando ele aparece na planilha.
+        cnes = record.get("cnes")
+        if cnes in CNES_CONHECIDOS:
+            known = CNES_CONHECIDOS[cnes]
+            record.setdefault("estabelecimento", known["estabelecimento"])
+            record.setdefault("municipio", known["municipio"])
